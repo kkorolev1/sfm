@@ -328,45 +328,23 @@ def triangulate_points(
 
     for track_index, track in enumerate(tracks):
         for i in range(len(track) - 1):
-            frame_id1 = track.get_frame(i)
-            frame_id2 = track.get_frame(i + 1)
-            point2d_frame1 = frame_to_keypoints[frame_id1].get_point2d(track[i])
-            point2d_frame2 = frame_to_keypoints[frame_id2].get_point2d(track[i+1])
+            for j in range(i + 1, len(track)):
+                frame_id1 = track.get_frame(i)
+                frame_id2 = track.get_frame(j)
+                point2d_frame1 = frame_to_keypoints[frame_id1].get_point2d(track[i])
+                point2d_frame2 = frame_to_keypoints[frame_id2].get_point2d(track[i+1])
 
-            frame_to_points2d[frame_id1].append(point2d_frame1)
-            frame_to_points2d[frame_id2].append(point2d_frame2)
+                proj_matr1 = frame_to_proj_matrix[frame_id1]
+                proj_matr2 = frame_to_proj_matrix[frame_id2]
 
-            frame_to_track_indices[frame_id1].append(track_index)
-            frame_to_track_indices[frame_id2].append(track_index)
-    
-    for i in range(len(anchor_frames) - 1):
-        frame_id1 = anchor_frames[i]
-        frame_id2 = anchor_frames[i + 1]
+                point4d = cv.triangulatePoints(proj_matr1, proj_matr2, point2d_frame1, point2d_frame2)
+                point3d = point4d_to_3d(point4d)
 
-        # 2xN
-        points2d_frame1 = np.array(frame_to_points2d[frame_id1], dtype=np.float64).T
-        points2d_frame2 = np.array(frame_to_points2d[frame_id2], dtype=np.float64).T
-        
-        if len(points2d_frame1.shape) < 2 or len(points2d_frame2.shape) < 2:
-            continue
-        
-        n_points = min(points2d_frame1.shape[1], points2d_frame2.shape[1])
-        points2d_frame1 = points2d_frame1[:, :n_points]
-        points2d_frame2 = points2d_frame2[:, :n_points]
+                error = reprojection_error(
+                    point2d_frame1, point3d, intrinsics_mat, frame_to_extrinsic_mat[frame_id1]
+                )
 
-        proj_matr1 = frame_to_proj_matrix[frame_id1]
-        proj_matr2 = frame_to_proj_matrix[frame_id2]
-
-        points4d = cv.triangulatePoints(proj_matr1, proj_matr2, points2d_frame1, points2d_frame2)
-        points3d = point4d_to_3d(points4d)
-
-        for j in range(points3d.shape[1]):
-            point3d = points3d[j]
-            
-        print(points3d.shape, len(frame_to_track_indices[frame_id1]), len(frame_to_track_indices[frame_id2]))
-            # error = reprojection_error(
-            #     proj_point1, point3d, intrinsics_mat, frame_to_extrinsic_mat[frame_id1]
-            # )
+                logging.info(f"Track [{track_index}] Frames [{frame_id1}/{frame_id2}] Err {error:.3f}")
 
     # for track_idx, points3d in track_idx_to_points3d.items():
     #     track = tracks[track_idx]
