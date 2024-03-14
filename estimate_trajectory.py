@@ -313,38 +313,57 @@ def point4d_to_3d(point4d: np.array) -> np.array:
     """
     return point4d[:3] / point4d[3]
 
-def triangulate_points(
+def ransac_triangulate_track(track: Track,
+           frame_to_keypoints: Dict[int, FrameKeypoints],
+           intrinsics_mat: np.array,
+           frame_to_extrinsic_mat: Dict[int, np.array],
+           frame_to_proj_matrix: Dict[int, np.array],
+           max_trials: int = 1000,
+           subsample_size: int = 4,
+           reproj_error_threshold: int = 10):
+    points3d = []
+    for i in range(len(track) - 1):
+        for j in range(i + 1, len(track)):
+            frame_id1 = track.get_frame(i)
+            frame_id2 = track.get_frame(j)
+            point2d_frame1 = frame_to_keypoints[frame_id1].get_point2d(track[i])
+            point2d_frame2 = frame_to_keypoints[frame_id2].get_point2d(track[i+1])
+
+            proj_matr1 = frame_to_proj_matrix[frame_id1]
+            proj_matr2 = frame_to_proj_matrix[frame_id2]
+
+            point4d = cv.triangulatePoints(proj_matr1, proj_matr2, point2d_frame1, point2d_frame2)
+            point3d = point4d_to_3d(point4d)
+
+            points3d.append(point3d)
+
+    points3d = np.array(points3d, dtype=np.float64)
+
+    for iter in range(max_trials):
+        indices = np.random.choice(len(points3d), 4)
+
+        error = reprojection_error(
+            point2d_frame1, point3d, intrinsics_mat, frame_to_extrinsic_mat[frame_id1]
+        )
+
+
+def triangulate_tracks(
         anchor_frames: List[int],
         tracks: List[Track],
         frame_to_keypoints: Dict[int, FrameKeypoints],
         intrinsics_mat: np.array,
         frame_to_extrinsic_mat: Dict[int, np.array],
+        max_trials=1000,
         reproj_error_threshold=10) -> Tuple[Dict[int, List[int]], Dict[int, List[np.array]]]:
     
     anchor_frames = sorted(anchor_frames)
     frame_to_proj_matrix = get_frame_to_proj_matrix(intrinsics_mat, frame_to_extrinsic_mat)
-    frame_to_points2d = defaultdict(list)
-    frame_to_track_indices = defaultdict(list)
 
     for track_index, track in enumerate(tracks):
-        for i in range(len(track) - 1):
-            for j in range(i + 1, len(track)):
-                frame_id1 = track.get_frame(i)
-                frame_id2 = track.get_frame(j)
-                point2d_frame1 = frame_to_keypoints[frame_id1].get_point2d(track[i])
-                point2d_frame2 = frame_to_keypoints[frame_id2].get_point2d(track[i+1])
-
-                proj_matr1 = frame_to_proj_matrix[frame_id1]
-                proj_matr2 = frame_to_proj_matrix[frame_id2]
-
-                point4d = cv.triangulatePoints(proj_matr1, proj_matr2, point2d_frame1, point2d_frame2)
-                point3d = point4d_to_3d(point4d)
-
-                error = reprojection_error(
-                    point2d_frame1, point3d, intrinsics_mat, frame_to_extrinsic_mat[frame_id1]
-                )
-
-                logging.info(f"Track [{track_index}] Frames [{frame_id1}/{frame_id2}] Err {error:.3f}")
+        ransac_triangulate_track(
+            track, frame_to_keypoints, intrinsics_mat, frame_to_extrinsic_mat, frame_to_proj_matrix,
+            max_trials=max_trials, reproj_error_threshold=reproj_error_threshold
+        )
 
     # for track_idx, points3d in track_idx_to_points3d.items():
     #     track = tracks[track_idx]
