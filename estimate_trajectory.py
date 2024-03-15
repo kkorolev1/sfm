@@ -198,8 +198,8 @@ def match_keypoints_pair(
             points2.append(keypoints2.kp[m.trainIdx].pt)
     if len(filtered_matches) == 0:
         return []
-    points1 = np.array(points1, dtype=np.int32)
-    points2 = np.array(points2, dtype=np.int32)
+    points1 = np.array(points1, dtype=np.float64)
+    points2 = np.array(points2, dtype=np.float64)
     if intrinsics_mat is None:
         _, mask = cv.findFundamentalMat(points1, points2, cv.FM_RANSAC)
     else:
@@ -439,7 +439,7 @@ class SFMConfig:
     n_keypoints: int = 500
     keypoints_overwrite_cache: bool = False
     matching_method: str = "bf" # [bf, flann]
-    matching_ratio_threshold: float = 0.7
+    matching_ratio_threshold: float = 0.9
     track_min_length: int = 3
     reproj_ratio_threshold: float = 0.5
     reproj_error_threshold: int = 10
