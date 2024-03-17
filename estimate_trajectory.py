@@ -4,9 +4,6 @@ import copyreg
 import pickle
 import logging
 from collections import defaultdict
-from multiprocessing import Pool
-import concurrent.futures
-from functools import partial
 
 import numpy as np
 import cv2 as cv
@@ -185,26 +182,6 @@ def get_frame_to_keypoints(
         )
     return frame_to_keypoints
 
-def get_frame_to_keypoints_parallel(
-        frame_to_image_path: Dict[int, str], **kwargs) -> Dict[int, FrameKeypoints]:
-    """
-    - Calculates keypoints for all frames and stores them into dictionary
-    frame_id -> keypoints
-    """
-    frame_to_keypoints = {}
-
-    frames = []
-    image_paths = []
-    for frame_id, image_path in frame_to_image_path.items():
-        frames.append(frame_id)
-        image_paths.append(image_path)
-    
-    fn = partial(FrameKeypoints.create, **kwargs)
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        for frame_id, keypoints in zip(frames, executor.map(fn, frames, image_paths)):
-            frame_to_keypoints[frame_id] = keypoints
-    return frame_to_keypoints
-
 def match_keypoints_pair(
         keypoints1: FrameKeypoints, keypoints2: FrameKeypoints,
         intrinsics_mat: np.array = None,
@@ -250,44 +227,16 @@ def match_anchor_keypoints(
     """
     Matches keypoints for anchor frames
     """
-    anchor_frames = sorted(anchor_frames)
     matches_for_frames = {}
     for i in range(len(anchor_frames) - 1):
         for j in range(i + 1, len(anchor_frames)):
             frame_id1, frame_id2 = anchor_frames[i], anchor_frames[j]
-            inliers_matches = match_keypoints_pair(
+            matches = match_keypoints_pair(
                 frame_to_keypoints[frame_id1],
                 frame_to_keypoints[frame_id2],
                 **kwargs
             )
-            matches_for_frames[(frame_id1, frame_id2)] = inliers_matches
-    return matches_for_frames
-
-def match_anchor_keypoints_parallel(
-        anchor_frames, 
-        frame_to_keypoints: Dict[int, FrameKeypoints],
-        **kwargs) -> Dict[Tuple[int, int], np.array]:
-    """
-    Matches keypoints for anchor frames
-    in parallel
-    """
-    anchor_frames = sorted(anchor_frames)
-    matches_for_frames = {}
-    
-    frames_pairs = []
-    frames_kp1 = []
-    frames_kp2 = []
-    for i in range(len(anchor_frames) - 1):
-        for j in range(i + 1, len(anchor_frames)):
-            frames_pairs.append((anchor_frames[i], anchor_frames[j]))
-            frames_kp1.append(frame_to_keypoints[anchor_frames[i]])
-            frames_kp2.append(frame_to_keypoints[anchor_frames[j]])
-
-    fn = partial(match_keypoints_pair, **kwargs)
-
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        for frame_ids, matches in zip(frames_pairs, executor.map(fn, frames_kp1, frames_kp2)):
-            matches_for_frames[frame_ids] = matches
+            matches_for_frames[(frame_id1, frame_id2)] = matches
     return matches_for_frames
 
 def match_test_with_anchor(
@@ -357,98 +306,87 @@ def get_frame_to_proj_matrix(intrinsics_mat: np.array,
         frame_to_proj_matrix[frame] = intrinsics_mat @ extrinsic_mat[:3]
     return frame_to_proj_matrix
 
-def project_points3d(points3d: np.array,
-                     intrinsics_mat: np.array,
-                     extrinsic_mat: np.array) -> np.array:
-    R = extrinsic_mat[:3,:3]
-    t = extrinsic_mat[:3,-1]
-    proj_points, _ = cv.projectPoints(points3d, R, t, intrinsics_mat, None)
-    return proj_points
+def project_points(points: np.array,
+                   proj_mat: np.array) -> np.array:
+    """
+    points: (N, 3)
+    proj_mat: (3, 4)
+    """
+    if points.shape[-1] == 3:
+        points = convert_to_homo(points)
+    return convert_from_homo((proj_mat @ points.T).T)
 
-def reprojection_error(
-        point2d: np.array,
-        point3d: np.array,
-        intrinsics_mat: np.array,
-        extrinsic_mat: Dict[int, np.array]) -> float:
-    reproj_point = project_points3d(point3d.reshape(-1, 1), intrinsics_mat, extrinsic_mat).ravel()
+def reprojection_error(point2d: np.array, point3d: np.array, proj_mat: np.array) -> float:
+    reproj_point = project_points(point3d, proj_mat)
     return np.linalg.norm(reproj_point - point2d)
 
 def convert_from_homo(point: np.array) -> np.array:
     """
-    point in homogenous coordinates: (D+1,N) or (D+1,) -> (D,N) or (D,)
+    point in homogenous coordinates: (N,D+1) or (D+1,) -> (N,D) or (D,)
     """
-    d = point.shape[0]
-    return point[:d-1] / point[d-1]
+    d = point.shape[-1]
+    return point[..., :d-1] / point[..., d-1][..., None]
 
 def convert_to_homo(point: np.array) -> np.array:
     """
-    point in euclidean coordinates: (D,N) or (D,) -> (D+1,N) or (D+1,)
+    point in euclidean coordinates: (N,D) or (D,) -> (N,D+1) or (D+1,)
     """
     if len(point.shape) == 1:
         return np.concatenate((point, [1]))
-    return np.concatenate((point, np.ones((1, point.shape[1]))), axis=0)
+    return np.concatenate((point, np.ones((point.shape[0], 1))), axis=1)
 
-def triangulate_nviews(points, proj_matrices):
-    """
-    points: (3,N)
-    proj_matrices: (N, 3, 4)
-    """
-    n = len(proj_matrices)
-    A = np.zeros((3 * n, 4 + n), dtype=np.float64)
+def triangulate_pairwise_estimate(
+        proj_matrices: np.array,
+        points2d: np.array,
+        reproj_error_threshold: int):
+    
+    num_views = proj_matrices.shape[0]
+    points3d = []
+    for i in range(num_views - 1):
+        for j in range(i + 1, num_views):
+            point3d = cv.triangulatePoints(proj_matrices[i], proj_matrices[j], points2d[i], points2d[j]).ravel()
+            points3d.append(convert_from_homo(point3d))
 
-    for i in range(len(proj_matrices)):
-        A[3*i:3*(i+1), 0:4] = -proj_matrices[i]
-        A[3*i:3*(i+1), 4+i] = points[:, i]
+    num_frames_for_points = []
+    for point3d in points3d:
+        num_frames = 0
+        for i in range(num_views):
+            error = reprojection_error(points2d[i], point3d, proj_matrices[i])
+            if error < reproj_error_threshold:
+                num_frames += 1
+        num_frames_for_points.append(num_frames)
 
-    _, _, Vh = np.linalg.svd(A, full_matrices=False)
-    solution = Vh[-1]
-    point3d = convert_from_homo(solution[:4])
-    return point3d
+    index = np.argmax(num_frames_for_points)
+    return points3d[index]
+
 
 def triangulate_track(track: Track,
            frame_to_keypoints: Dict[int, FrameKeypoints],
-           intrinsics_mat: np.array,
-           frame_to_extrinsic_mat: Dict[int, np.array],
            frame_to_proj_matrix: Dict[int, np.array],
            reproj_error_threshold: int = 10):
-    points2d = []
+
+    num_views = len(track)
     proj_matrices = []
-    for i in range(len(track)):
-        frame_id = track.get_frame(i)
-        point2d = frame_to_keypoints[frame_id].get_point2d(track[i])
-        proj_matr = frame_to_proj_matrix[frame_id]
-        points2d.append(point2d)
-        proj_matrices.append(proj_matr)
-
+    points2d = []
+    for frame_id, point_idx in zip(track.frames, track.items):
+        proj_matrices.append(frame_to_proj_matrix[frame_id])
+        points2d.append(frame_to_keypoints[frame_id].get_point2d(point_idx))
+    proj_matrices = np.array(proj_matrices)
     points2d = np.array(points2d)
-    proj_matrices = np.array(proj_matrices)    
-    point3d = triangulate_nviews(convert_to_homo(points2d.T), proj_matrices)
 
-    def evaluate_track(x):
-        track_errors = []
-        for i in range(len(track)):
-            frame_id = track.get_frame(i)
-            point2d = frame_to_keypoints[frame_id].get_point2d(track[i])
-            error = reprojection_error(point2d, x, intrinsics_mat, frame_to_extrinsic_mat[frame_id])
-            track_errors.append(error)
-        return track_errors
+    point3d = triangulate_pairwise_estimate(
+        proj_matrices, points2d,
+        reproj_error_threshold=reproj_error_threshold
+    )
 
     def res_fn(x):
-        res = []
-        for i in range(len(track)):
-            frame_id = track.get_frame(i)
-            point2d = frame_to_keypoints[frame_id].get_point2d(track[i])
-            error = reprojection_error(point2d, x, intrinsics_mat, frame_to_extrinsic_mat[frame_id])
-            res.append(error)
-        return np.array(res, dtype=np.float64).ravel()
+        return (points2d - convert_from_homo(proj_matrices @ x)).ravel()
 
-    ls_result = least_squares(res_fn, x0=point3d, method="lm")
-    point3d = ls_result.x
+    ls_result = least_squares(res_fn, x0=convert_to_homo(point3d))
+    point3d = convert_from_homo(ls_result.x)
 
-    for i in range(len(track)):
-        frame_id = track.get_frame(i)
-        point2d = frame_to_keypoints[frame_id].get_point2d(track[i])
-        error = reprojection_error(point2d, point3d, intrinsics_mat, frame_to_extrinsic_mat[frame_id])
+    for i in range(num_views):
+        error = reprojection_error(points2d[i], point3d, proj_matrices[i])
         if error > reproj_error_threshold:
             return None
 
@@ -467,41 +405,12 @@ def triangulate_tracks(
     tracks_point3d = []
     for track in tracks:
         point3d = triangulate_track(
-            track, frame_to_keypoints, intrinsics_mat, 
-            frame_to_extrinsic_mat, frame_to_proj_matrix,
+            track, frame_to_keypoints, frame_to_proj_matrix,
             reproj_error_threshold=reproj_error_threshold
         )
         if point3d is not None:
             good_tracks.append(track)
             tracks_point3d.append(point3d)
-
-    return good_tracks, tracks_point3d
-
-def triangulate_tracks_parallel(
-        tracks: List[Track],
-        frame_to_keypoints: Dict[int, FrameKeypoints],
-        intrinsics_mat: np.array,
-        frame_to_extrinsic_mat: Dict[int, np.array],
-        reproj_error_threshold=10) -> Tuple[List[Track], List[np.array]]:
-    
-    frame_to_proj_matrix = get_frame_to_proj_matrix(intrinsics_mat, frame_to_extrinsic_mat)
-    good_tracks = []
-    tracks_point3d = []
-
-    fn = partial(
-        triangulate_track, 
-        frame_to_keypoints=frame_to_keypoints,
-        intrinsics_mat=intrinsics_mat,
-        frame_to_extrinsic_mat=frame_to_extrinsic_mat,
-        frame_to_proj_matrix=frame_to_proj_matrix,
-        reproj_error_threshold=reproj_error_threshold
-    )
-    
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        for track, point3d in zip(tracks, executor.map(fn, tracks)):
-            if point3d is not None:
-                good_tracks.append(track)
-                tracks_point3d.append(point3d)
 
     return good_tracks, tracks_point3d
 
@@ -552,56 +461,32 @@ def estimate_test_poses(
         frame_to_pose[frame_id] = create_pose(rvec, tvec)
     return frame_to_pose
 
-from matplotlib import pyplot as plt
-import matplotlib.animation as animation
-def plot_track(frame_to_image_paths, frame_to_keypoints, tracks, track_idx, out_dir="videos"):
-    os.makedirs(out_dir, exist_ok=True)
-    frames = []
-    fig = plt.figure()
-    track = tracks[track_idx]
-    print(f"Track {track_idx} of size {len(track)}")
-    for i in range(len(track)):
-        frame_id = track.get_frame(i)
-        pt = frame_to_keypoints[frame_id].kp[track[i]].pt
-        pt = tuple(map(int, pt))
-        img = cv.imread(frame_to_image_paths[frame_id])
-        img = cv.circle(img, pt, 5, color=(0, 255, 0), thickness=10)
-        frames.append([plt.imshow(img, animated=True)])
-    ani = animation.ArtistAnimation(fig, frames, interval=400, blit=True,
-                                repeat_delay=1000)
-    ani.save(os.path.join(out_dir, f"track_{track_idx}.mp4"))
-
-class SFMConfig:
-    keypoints_save_dir: str = None
-    keypoints_method: str = "orb" # [orb, sift]
-    n_keypoints: int = 500
-    keypoints_overwrite_cache: bool = False
-    matching_method: str = "bf" # [bf, flann]
-    matching_ratio_threshold: float = 0.7
-    track_min_length: int = 3
-    reproj_error_threshold: int = 10
-
-import time
-def estimate_trajectory(data_dir: str, out_dir: str):
-    patch_keypoint_pickiling()
-
-    config = SFMConfig()
-    # DEBUG ONLY
-    #config.keypoints_save_dir = "keypoints"
+def estimate_trajectory(data_dir: str, out_dir: str,
+                        keypoints_save_dir: str = None,
+                        keypoints_method: str = "orb", # [orb, sift]
+                        n_keypoints: int = 300,
+                        keypoints_overwrite_cache: bool = False,
+                        matching_method: str = "bf", # [bf, flann]
+                        matching_ratio_threshold: float = 0.6,
+                        matching_use_intrinsics: bool = False,
+                        track_min_length: int = 2,
+                        reproj_error_threshold: int = 5): # [pairwise, dlt]
+    if keypoints_method == "orb" and matching_method == "flann":
+        Trajectory.write(Dataset.get_result_poses_file(out_dir), {})
+        return
 
     frame_to_image_path = get_frame_to_image_path(data_dir)
     logging.info("Get keypoints for frames...")
-    #then = time.time()
+    
     frame_to_keypoints = get_frame_to_keypoints(
         frame_to_image_path, 
         data_dir=data_dir, 
-        save_dir=config.keypoints_save_dir, 
-        method=config.keypoints_method,
-        n_keypoints=config.n_keypoints,
-        overwrite_cache=config.keypoints_overwrite_cache
+        save_dir=keypoints_save_dir, 
+        method=keypoints_method,
+        n_keypoints=n_keypoints,
+        overwrite_cache=keypoints_overwrite_cache
     )
-    # now = time.time()
-    # print("Duration", now - then)
+
     frame_to_extrinsic_mat = get_frame_to_extrinsic_matrix(data_dir)
     intrinsics_mat = get_intrinsics_matrix(data_dir)
 
@@ -609,19 +494,20 @@ def estimate_trajectory(data_dir: str, out_dir: str):
     logging.info("Get matches within keypoints...")
     frames_to_matches = match_anchor_keypoints(
         anchor_frames, frame_to_keypoints, 
-        intrinsics_mat=None, method=config.matching_method,
-        ratio_threshold=config.matching_ratio_threshold
+        intrinsics_mat=(intrinsics_mat if matching_use_intrinsics else None),
+        method=matching_method,
+        ratio_threshold=matching_ratio_threshold
     )
     logging.info("Get keypoints tracks...")
-    tracks = get_tracks(frames_to_matches, track_min_length=config.track_min_length)
+    tracks = get_tracks(frames_to_matches, track_min_length=track_min_length)
     logging.info(f"Found {len(tracks)} tracks!")
     logging.info(f"Mean track length {np.mean([len(t) for t in tracks]):.3f}")
     
     logging.info("Triangulate points along tracks...")
-    #plot_track(frame_to_image_path, frame_to_keypoints, tracks, 0)
+
     good_tracks, tracks_points3d = triangulate_tracks(
         tracks, frame_to_keypoints, intrinsics_mat, frame_to_extrinsic_mat,
-        reproj_error_threshold=config.reproj_error_threshold
+        reproj_error_threshold=reproj_error_threshold
     )
     logging.info(f"Found {len(good_tracks)} good tracks!")
     logging.info(f"Mean good track length {np.mean([len(t) for t in good_tracks]):.3f}")
@@ -636,15 +522,16 @@ def estimate_trajectory(data_dir: str, out_dir: str):
     frames_to_matches = match_test_with_anchor(
         test_frame_to_keypoints,
         anchor_frame_to_keypoints,
-        intrinsics_mat=None, method=config.matching_method,
-        ratio_threshold=config.matching_ratio_threshold
+        intrinsics_mat=(intrinsics_mat if matching_use_intrinsics else None),
+        method=matching_method,
+        ratio_threshold=matching_ratio_threshold
     )
 
     test_frame_to_points2d = defaultdict(list)
     test_frame_to_points3d = defaultdict(list)
     for (test_frame, anchor_frame), matches in frames_to_matches.items():
         for match in matches:
-            point2d = anchor_frame_to_keypoints[anchor_frame].get_point2d(match[1])
+            point2d = test_frame_to_keypoints[test_frame].get_point2d(match[0])
             point3d = anchor_frame_to_keypoints[anchor_frame].get_point3d(match[1])
 
             test_frame_to_points2d[test_frame].append(point2d)
@@ -653,14 +540,6 @@ def estimate_trajectory(data_dir: str, out_dir: str):
     for frame_id in test_frame_to_points2d:
         points2d = np.array(test_frame_to_points2d[frame_id])
         points3d = np.array(test_frame_to_points3d[frame_id])
-
-        # Filter by 2d points
-        points2d, indices = np.unique(points2d, return_index=True, axis=0)
-        points3d = points3d[indices]
-
-        # Filter by 3d points
-        points3d, indices = np.unique(points3d, return_index=True, axis=0)
-        points2d = points2d[indices]
 
         logging.info(f"Test Frame [{frame_id}] #Points [{len(points2d)}]")
         test_frame_to_points2d[frame_id] = points2d
@@ -671,9 +550,13 @@ def estimate_trajectory(data_dir: str, out_dir: str):
     )
     Trajectory.write(Dataset.get_result_poses_file(out_dir), trajectory)
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, filemode="w", filename="log.txt", format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger().addHandler(logging.StreamHandler())
-    out_dir = "out_dir"
-    os.makedirs(out_dir, exist_ok=True)
-    estimate_trajectory("public_tests/00_test_slam_input", out_dir)
+# if __name__ == "__main__":
+#     import json
+#     logging.basicConfig(level=logging.INFO, filemode="w", filename="log.txt", format="%(asctime)s %(levelname)s %(message)s")
+#     logging.getLogger().addHandler(logging.StreamHandler())
+#     out_dir = "out_dir"
+#     os.makedirs(out_dir, exist_ok=True)
+#     with open("config.json", "r") as f:
+#         params = json.load(f)
+#     print(params)
+#     estimate_trajectory("public_tests/00_test_slam_input", out_dir, **params)

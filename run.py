@@ -8,10 +8,12 @@ from sys import argv, exit
 from common.dataset import Dataset
 from common import testing
 
-
 def run_single_test(data_dir, output_dir):
     from estimate_trajectory import estimate_trajectory
-    estimate_trajectory(data_dir, output_dir)
+    with open("config.json", "r") as f:
+        params = load(f)
+    print(params)
+    estimate_trajectory(data_dir, output_dir, **params)
 
 
 def check_test(data_dir):
@@ -160,4 +162,4 @@ if __name__ == '__main__':
 
         dump(results, open(join(tests_dir, 'results.json'), 'w'))
         res = grade(tests_dir)
-        print(f'Mark: {res["mark"]:.2f}', res['description'])
+        print(f'Mark: {res["mark"]}', res['description'])
