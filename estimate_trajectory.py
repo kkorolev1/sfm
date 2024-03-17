@@ -422,9 +422,7 @@ def get_inliers_keypoints(
     frame_to_des = defaultdict(list)
     frame_to_points3d = defaultdict(list)
     for track, point3d in zip(tracks, tracks_points):
-        for i in range(len(track)):
-            frame_id = track.get_frame(i)
-            point_idx = track.get_item(i)
+        for frame_id, point_idx in zip(track.frames, track.items):
             kp, des = frame_to_keypoints[frame_id][point_idx]
             frame_to_kp[frame_id].append(kp)
             frame_to_des[frame_id].append(des)
@@ -455,8 +453,8 @@ def estimate_test_poses(
         intrinsics_mat):
     frame_to_pose = {}
     for frame_id in test_frame_to_points2d:
-        points2d = test_frame_to_points2d[frame_id]
-        points3d = test_frame_to_points3d[frame_id]
+        points2d = np.array(test_frame_to_points2d[frame_id])
+        points3d = np.array(test_frame_to_points3d[frame_id])
         _, rvec, tvec, _ = cv.solvePnPRansac(points3d, points2d, intrinsics_mat, None)
         frame_to_pose[frame_id] = create_pose(rvec, tvec)
     return frame_to_pose
@@ -470,10 +468,7 @@ def estimate_trajectory(data_dir: str, out_dir: str,
                         matching_ratio_threshold: float = 0.6,
                         matching_use_intrinsics: bool = False,
                         track_min_length: int = 2,
-                        reproj_error_threshold: int = 5): # [pairwise, dlt]
-    if keypoints_method == "orb" and matching_method == "flann":
-        Trajectory.write(Dataset.get_result_poses_file(out_dir), {})
-        return
+                        reproj_error_threshold: int = 5):
 
     frame_to_image_path = get_frame_to_image_path(data_dir)
     logging.info("Get keypoints for frames...")
@@ -513,9 +508,6 @@ def estimate_trajectory(data_dir: str, out_dir: str,
     logging.info(f"Mean good track length {np.mean([len(t) for t in good_tracks]):.3f}")
     anchor_frame_to_keypoints = get_inliers_keypoints(good_tracks, tracks_points3d, frame_to_keypoints)
 
-    for frame_id in anchor_frame_to_keypoints:
-        logging.info(f"Frame [{frame_id}] #Points [{len(anchor_frame_to_keypoints[frame_id])}]")
-
     test_frames = frame_to_keypoints.keys() - set(anchor_frames)
     test_frame_to_keypoints = {f:k for f,k in frame_to_keypoints.items() if f in test_frames}
 
@@ -536,14 +528,6 @@ def estimate_trajectory(data_dir: str, out_dir: str,
 
             test_frame_to_points2d[test_frame].append(point2d)
             test_frame_to_points3d[test_frame].append(point3d)
-    
-    for frame_id in test_frame_to_points2d:
-        points2d = np.array(test_frame_to_points2d[frame_id])
-        points3d = np.array(test_frame_to_points3d[frame_id])
-
-        logging.info(f"Test Frame [{frame_id}] #Points [{len(points2d)}]")
-        test_frame_to_points2d[frame_id] = points2d
-        test_frame_to_points3d[frame_id] = points3d
 
     trajectory = estimate_test_poses(
         test_frame_to_points2d, test_frame_to_points3d, intrinsics_mat
