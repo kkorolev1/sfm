@@ -10,10 +10,7 @@ from common import testing
 
 def run_single_test(data_dir, output_dir):
     from estimate_trajectory import estimate_trajectory
-    with open("config.json", "r") as f:
-        params = load(f)
-    print(params)
-    estimate_trajectory(data_dir, output_dir, **params)
+    estimate_trajectory(data_dir, output_dir)
 
 
 def check_test(data_dir):

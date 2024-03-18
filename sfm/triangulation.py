@@ -11,26 +11,21 @@ from sfm.utils import get_frame_to_proj_matrix
 def triangulate_pairwise_estimate(
         proj_matrices: np.array,
         points2d: np.array,
-        reproj_error_threshold: int):
+        reproj_error_threshold: int) -> np.array:
     
     num_views = proj_matrices.shape[0]
-    points3d = []
+    points4d = []
     for i in range(num_views - 1):
         for j in range(i + 1, num_views):
-            point3d = cv.triangulatePoints(proj_matrices[i], proj_matrices[j], points2d[i], points2d[j]).ravel()
-            points3d.append(convert_from_homo(point3d))
+            point4d = cv.triangulatePoints(proj_matrices[i], proj_matrices[j], points2d[i], points2d[j]).ravel()
+            points4d.append(point4d)
+    points4d = np.array(points4d)
 
-    num_frames_for_points = []
-    for point3d in points3d:
-        num_frames = 0
-        for i in range(num_views):
-            error = reprojection_error(points2d[i], point3d, proj_matrices[i])
-            if error < reproj_error_threshold:
-                num_frames += 1
-        num_frames_for_points.append(num_frames)
-
-    index = np.argmax(num_frames_for_points)
-    return points3d[index]
+    # (num_views, num_views_pairs, 2)
+    proj_points = convert_from_homo(np.einsum("nij,mj->nmi", proj_matrices, points4d))
+    reproj_errors = np.linalg.norm(proj_points - points2d[:, None, :], axis=-1)
+    num_frames_for_points = (reproj_errors < reproj_error_threshold).sum(axis=0)
+    return points4d[np.argmax(num_frames_for_points)]
 
 
 def triangulate_track(track: Track,
@@ -47,7 +42,7 @@ def triangulate_track(track: Track,
     proj_matrices = np.array(proj_matrices)
     points2d = np.array(points2d)
 
-    point3d = triangulate_pairwise_estimate(
+    point4d = triangulate_pairwise_estimate(
         proj_matrices, points2d,
         reproj_error_threshold=reproj_error_threshold
     )
@@ -55,15 +50,14 @@ def triangulate_track(track: Track,
     def res_fn(x):
         return (points2d - convert_from_homo(proj_matrices @ x)).ravel()
 
-    ls_result = least_squares(res_fn, x0=convert_to_homo(point3d))
-    point3d = convert_from_homo(ls_result.x)
+    ls_result = least_squares(res_fn, x0=point4d)
+    point4d = ls_result.x
 
-    for i in range(num_views):
-        error = reprojection_error(points2d[i], point3d, proj_matrices[i])
-        if error > reproj_error_threshold:
-            return None
+    reproj_errors = np.linalg.norm(points2d - convert_from_homo(proj_matrices @ point4d), axis=-1)
+    if np.any(reproj_errors > reproj_error_threshold):
+        return None
 
-    return point3d
+    return convert_from_homo(point4d)
 
 
 def triangulate_tracks(
