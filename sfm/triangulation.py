@@ -32,8 +32,6 @@ def triangulate_track(track: Track,
            frame_to_keypoints: Dict[int, FrameKeypoints],
            frame_to_proj_matrix: Dict[int, np.array],
            reproj_error_threshold: int = 10):
-
-    num_views = len(track)
     proj_matrices = []
     points2d = []
     for frame_id, point_idx in zip(track.frames, track.items):
