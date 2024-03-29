@@ -64,13 +64,13 @@ def estimate_test_poses(
 def estimate_trajectory(data_dir: str, out_dir: str,
                         keypoints_save_dir: str = None,
                         keypoints_method: str = "orb", # [orb, sift]
-                        n_keypoints: int = 300,
+                        n_keypoints: int = 500,
                         keypoints_overwrite_cache: bool = False,
                         matching_method: str = "bf", # [bf, flann]
                         matching_ratio_threshold: float = 0.6,
                         matching_use_intrinsics: bool = False,
                         track_min_length: int = 2,
-                        reproj_error_threshold: int = 5):
+                        reproj_error_threshold: int = 10):
     frame_to_image_path = get_frame_to_image_path(data_dir)
     logging.info("Get keypoints for frames...")
     
@@ -134,10 +134,3 @@ def estimate_trajectory(data_dir: str, out_dir: str,
         test_frame_to_points2d, test_frame_to_points3d, intrinsics_mat
     )
     Trajectory.write(Dataset.get_result_poses_file(out_dir), trajectory)
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, filemode="w", filename="log.txt", format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger().addHandler(logging.StreamHandler())
-    out_dir = "out_dir"
-    os.makedirs(out_dir, exist_ok=True)
-    estimate_trajectory("public_tests/00_test_slam_input", out_dir)
